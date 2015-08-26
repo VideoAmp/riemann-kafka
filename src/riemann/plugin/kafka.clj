@@ -1,5 +1,6 @@
 (ns riemann.plugin.kafka
   "A riemann plugin to consume and produce from and to a kafka queue"
+  (:use [clojure.tools.logging :only (info error debug warn)])
   (:import com.aphyr.riemann.Proto$Msg
            kafka.consumer.KafkaStream
            kafka.producer.KeyedMessage)
@@ -10,7 +11,14 @@
             [clj-kafka.producer    :refer [send-message producer]]
             [riemann.service       :refer [Service ServiceEquiv]]
             [riemann.config        :refer [service!]]
-            [clojure.tools.logging :refer [info error]]))
+            [clojure.tools.logging :refer [info error]]
+            [clj-json.core :as json]
+            [clj-time.format]
+            [clj-time.core]
+            [clj-time.coerce]
+            [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [riemann.streams :as streams]))
 
 (defn safe-decode
   "Do not let a bad payload break our consumption"
@@ -81,10 +89,67 @@
          (reset! running? false)
          (info "kafka consumer stopping"))))))
 
+(def ^{:private true} format-iso8601
+  (clj-time.format/with-zone (clj-time.format/formatters :date-time)
+    clj-time.core/utc))
+
+(defn ^{:private true} iso8601 [event-s]
+  (clj-time.format/unparse format-iso8601
+                           (clj-time.coerce/from-long (* 1000 event-s))))
+
+(defn ^{:private true} safe-iso8601 [event-s]
+  (try (iso8601 event-s)
+    (catch Exception e
+      (warn "Unable to parse iso8601 input: " event-s)
+      (clj-time.format/unparse format-iso8601 (clj-time.core/now)))))
+
+(defn ^{:private true} stashify-timestamp [event]
+  (->  (if-not (get event "@timestamp")
+         (let [isotime (:isotime event)]
+           (if-not isotime
+             (let [time (:time event)]
+               (assoc event "@timestamp" (safe-iso8601 (long time))))
+             (assoc event "@timestamp" isotime)))
+         event)
+       (dissoc :isotime)
+       (dissoc :time)
+       (dissoc :ttl)))
+
+(defn ^{:private true} edn-safe-read [v]
+  (try
+    (edn/read-string v)
+    (catch Exception e
+      (warn "Unable to read supposed EDN form with value: " v)
+      v)))
+
+(defn ^{:private true} massage-event [event]
+  (into {}
+        (for [[k v] event
+              :when v]
+          (cond
+           (= (name k) "_id") [k v]
+           (.startsWith (name k) "_")
+           [(.substring (name k) 1) (edn-safe-read v)]
+           :else
+           [k v]))))
+
+(defn ^{:private true} elastic-event [event massage]
+  (let [e (-> event
+              stashify-timestamp)]
+    (if massage
+      (massage-event e)
+      e)))
+
+(defn ^{:private true} riemann-to-elasticsearch [events massage]
+  (->> [events]
+       flatten
+       (remove streams/expired?)
+       (map #(elastic-event % massage))))
+
 (defn kafka-producer
   "Yield a kafka producer"
   [{:keys [topic] :as config}]
   (let [p (producer (stringify config))]
     (fn [event]
       (let [events (if (sequential? event) event [event])]
-        (send-message p (KeyedMessage. topic (encode events)))))))
+        (doseq [message (riemann-to-elasticsearch events true)] (send-message p (KeyedMessage. topic (.getBytes (json/generate-string message) "utf-8"))))))))
