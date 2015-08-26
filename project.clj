@@ -1,4 +1,4 @@
-(defproject spootnik/riemann-kafka "0.1.2"
+(defproject spootnik/riemann-kafka "0.1.2-vamp"
   :description "riemann producer and consumer for kafka queues"
   :url "https://github.com/pyr/riemann-kafka"
   :license {:name "MIT License"}
@@ -6,4 +6,9 @@
                  [riemann             "0.2.10-vamp"]
                  [clj-kafka           "0.3.2"
                   :exclusions [org.slf4j/slf4j-log4j12
-                               org.slf4j/slf4j-simple]]])
+                               org.slf4j/slf4j-simple]]]
+  :repositories [["snapshots" {:url "https://videoamp.artifactoryonline.com/videoamp/snapshot" 
+                               :sign-releases false}]
+                 ["releases" {:url "https://videoamp.artifactoryonline.com/videoamp/release"
+                              :sign-releases false}]]
+)
